@@ -29,10 +29,9 @@ don't appear in the portal dialog.
 
 ## Status
 
-Tested on Ubuntu with Hyprland, xdg-desktop-portal 1.21 and Strata as the FileChooser
-backend, with the included `test_chooser` program (which builds its dialog the way 3DCoat
-does), on the host and inside the 3DCoat 2026.25 Flatpak sandbox. Reports from other
-desktops and 3DCoat versions are welcome: open an issue.
+Works with **3DCoat 2026.25** (Pilgway's Flatpak) on Ubuntu with Hyprland,
+xdg-desktop-portal 1.21 and Strata as the FileChooser backend: opening and saving files.
+Reports from other desktops and 3DCoat versions are welcome: open an issue.
 
 ## Build
 
@@ -96,6 +95,20 @@ FileChooser, e.g. in `~/.config/xdg-desktop-portal/portals.conf` (or `<desktop>-
 default=gtk
 org.freedesktop.impl.portal.FileChooser=gnome;gtk;
 ```
+
+## Tiling window managers (Hyprland, Sway, …)
+
+The portal dialog is a separate app window, so your window manager places it like any other
+window. On Hyprland, 3DCoat runs fullscreen or maximized as a *floating* window, and the file
+dialog opened as a *tiled* window behind it. Make the dialog float, so it opens on top:
+
+```ini
+# Hyprland 0.53+ (use your backend's window class; check with `hyprctl clients`)
+windowrule = match:class ^(io\.github\.lgse\.Strata\.FileChooser)$, float on, center on, size (monitor_w*0.75) (monitor_h*0.75)
+```
+
+Older Hyprland: `windowrulev2 = float, class:^(io\.github\.lgse\.Strata\.FileChooser)$`.
+For GNOME's dialog the class is usually `xdg-desktop-portal-gnome`, for GTK's `xdg-desktop-portal-gtk`.
 
 ## Environment variables
 
