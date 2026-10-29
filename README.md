@@ -16,6 +16,10 @@ The app doesn't notice: it gets the chosen path back exactly as from the GTK2 di
 
 * **Open**, **Save** (the suggested file name and folder are filled in), multiple selection
   and folder pickers.
+* **File name in Save As.** 3DCoat doesn't pass a file name to its save dialogs, so the name
+  field would be empty. If an app gives none, the library takes it from the app's window title
+  (`scene.3b* - 3DCoat 2026.25` → `scene.3b`), and switches the extension when the dialog's
+  filter doesn't accept it (an OBJ export suggests `scene.obj`).
 * **File type filters.** 3DCoat uses GTK2 *custom* filters (a callback, no patterns), which
   the portal can't take. The library probes each callback with a list of known extensions
   (3DCoat formats, meshes, images, …) and turns the result into a *Supported (obj, fbx, …)*
@@ -115,6 +119,7 @@ For GNOME's dialog the class is usually `xdg-desktop-portal-gnome`, for GTK's `x
 | Variable | Effect |
 |---|---|
 | `GTK2_PORTAL_DEBUG=1` | Log what the library does to stderr |
+| `GTK2_PORTAL_LOG=/path/file.log` | Log to this file instead (handy when the app is started from a menu) |
 | `GTK2_PORTAL_DISABLE=1` | Use the normal GTK2 dialog |
 
 ## Troubleshooting

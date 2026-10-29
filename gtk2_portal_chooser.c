@@ -8,7 +8,12 @@
  * are probed with a list of known extensions and turned into glob filters.
  * If the portal call fails, the real GTK2 dialog is shown instead.
  *
- * Env: GTK2_PORTAL_DEBUG=1 logs to stderr, GTK2_PORTAL_DISABLE=1 bypasses.
+ * Save dialogs without a file name get one from the app's window title
+ * ("scene.3b* - 3DCoat ..." -> "scene.3b"), with the extension switched to one
+ * the dialog's filter accepts.
+ *
+ * Env: GTK2_PORTAL_DEBUG=1 logs to stderr (or to the file GTK2_PORTAL_LOG),
+ * GTK2_PORTAL_DISABLE=1 bypasses.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -59,8 +64,10 @@ typedef struct {
 static GHashTable *choosers; /* GtkWidget* -> Chooser* */
 static GHashTable *filters;  /* GtkFileFilter* -> GSList* of CustomFilter* */
 static gboolean debug_on;
+static FILE *log_fp;
+static char *app_title; /* last title set on a non-chooser window */
 
-#define DBG(...) do { if (debug_on) { fprintf(stderr, "[gtk2-portal] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
+#define DBG(...) do { if (debug_on) { fprintf(log_fp, "[gtk2-portal] " __VA_ARGS__); fputc('\n', log_fp); fflush(log_fp); } } while (0)
 
 #define REAL(ret, name, ...) \
     static ret (*real_fn)(__VA_ARGS__); \
@@ -72,7 +79,11 @@ static void init_once(void)
         return;
     choosers = g_hash_table_new(g_direct_hash, g_direct_equal);
     filters = g_hash_table_new(g_direct_hash, g_direct_equal);
-    debug_on = g_getenv("GTK2_PORTAL_DEBUG") != NULL;
+    const char *log = g_getenv("GTK2_PORTAL_LOG");
+    log_fp = log ? fopen(log, "a") : NULL;
+    if (!log_fp)
+        log_fp = stderr;
+    debug_on = g_getenv("GTK2_PORTAL_DEBUG") != NULL || log_fp != stderr;
 }
 
 static Chooser *lookup(gpointer w)
@@ -182,6 +193,35 @@ void gtk_file_filter_add_custom(GtkFileFilter *filter, int needed, FilterFunc fu
     real_fn(filter, needed, func, data, notify);
 }
 
+void gtk_window_set_title(GtkWindow *window, const gchar *title)
+{
+    REAL(void, "gtk_window_set_title", GtkWindow *, const gchar *);
+    if (!lookup(window) && title && *title) {
+        g_free(app_title);
+        app_title = g_strdup(title);
+    }
+    real_fn(window, title);
+}
+
+/* "scene.3b* - 3DCoat 2026.25" -> "scene.3b"; NULL if the title has no file name */
+static char *name_from_title(void)
+{
+    if (!app_title)
+        return NULL;
+    const char *sep = strstr(app_title, " - ");
+    char *part = sep ? g_strndup(app_title, sep - app_title) : g_strdup(app_title);
+    g_strstrip(part);
+    while (*part && part[strlen(part) - 1] == '*')
+        part[strlen(part) - 1] = '\0';
+    char *name = g_path_get_basename(g_strstrip(part[0] == '*' ? part + 1 : part));
+    g_free(part);
+    if (!strchr(name, '.') || name[0] == '.') {
+        g_free(name);
+        return NULL;
+    }
+    return name;
+}
+
 /* ---------- results ---------- */
 
 gchar *gtk_file_chooser_get_filename(GtkFileChooser *ch)
@@ -255,9 +295,10 @@ static gboolean filter_accepts(GSList *cfs, const char *name)
 }
 
 /* Returns a floating a(sa(us)) filter list, or NULL if no usable filter. */
-static GVariant *build_filters(Chooser *c, GVariant **current)
+static GVariant *build_filters(Chooser *c, GVariant **current, char **first_ext)
 {
     *current = NULL;
+    *first_ext = NULL;
     if (!c->filter)
         return NULL;
     GSList *cfs = g_hash_table_lookup(filters, c->filter);
@@ -283,6 +324,8 @@ static GVariant *build_filters(Chooser *c, GVariant **current)
             g_variant_builder_add(&globs, "(us)", 0, gl);
             g_variant_builder_add(&globs, "(us)", 0, gu);
             g_string_append_printf(label, "%s%s", n ? ", " : "", e);
+            if (!n)
+                *first_ext = g_strdup(e);
             n++;
             g_free(gl);
             g_free(gu);
@@ -389,21 +432,38 @@ static gboolean run_portal(Chooser *c, int *resp)
     if (c->multiple && !save)
         g_variant_builder_add(&opts, "{sv}", "multiple", g_variant_new_boolean(TRUE));
 
+    GVariant *current = NULL;
+    char *first_ext = NULL;
+    GVariant *flist = build_filters(c, &current, &first_ext);
+
     char *folder = c->folder ? g_strdup(c->folder) : NULL;
-    if (c->filename) {
-        if (save) {
-            char *base = g_path_get_basename(c->filename);
-            g_variant_builder_add(&opts, "{sv}", "current_name", g_variant_new_string(base));
-            g_free(base);
-        }
+    char *name = NULL;
+    if (c->filename && g_file_test(c->filename, G_FILE_TEST_IS_DIR)) {
+        if (!folder)
+            folder = g_strdup(c->filename);
+    } else if (c->filename) {
+        if (save)
+            name = g_path_get_basename(c->filename);
         if (!folder && g_path_is_absolute(c->filename))
             folder = g_path_get_dirname(c->filename);
     }
+    if (save && !name && (name = name_from_title())) {
+        /* e.g. "scene.3b" in an OBJ export dialog -> "scene.obj" */
+        GSList *cfs = c->filter ? g_hash_table_lookup(filters, c->filter) : NULL;
+        if (cfs && first_ext && !filter_accepts(cfs, name)) {
+            char *dot = strrchr(name, '.');
+            *dot = '\0';
+            char *renamed = g_strdup_printf("%s.%s", name, first_ext);
+            g_free(name);
+            name = renamed;
+        }
+        DBG("name from window title '%s' -> '%s'", app_title, name);
+    }
+    if (name)
+        g_variant_builder_add(&opts, "{sv}", "current_name", g_variant_new_string(name));
     if (folder && g_file_test(folder, G_FILE_TEST_IS_DIR))
         add_bytestring(&opts, "current_folder", folder);
 
-    GVariant *current = NULL;
-    GVariant *flist = build_filters(c, &current);
     if (flist) {
         g_variant_builder_add(&opts, "{sv}", "filters", flist);
         g_variant_builder_add(&opts, "{sv}", "current_filter", current);
@@ -411,7 +471,8 @@ static gboolean run_portal(Chooser *c, int *resp)
     }
 
     char *parent = parent_handle(c->parent);
-    DBG("%s title='%s' folder='%s' parent='%s'", method, c->title, folder ? folder : "", parent);
+    DBG("%s title='%s' folder='%s' name='%s' set_filename='%s' parent='%s'", method, c->title,
+        folder ? folder : "", name ? name : "", c->filename ? c->filename : "", parent);
     GVariant *ret = g_dbus_connection_call_sync(
         bus, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
         "org.freedesktop.portal.FileChooser", method,
@@ -456,6 +517,8 @@ static gboolean run_portal(Chooser *c, int *resp)
     g_main_loop_unref(w.loop);
     g_free(parent);
     g_free(folder);
+    g_free(name);
+    g_free(first_ext);
     g_free(rule);
     g_free(req_path);
     g_free(sender);
